@@ -9,6 +9,67 @@ Streamlit ──► agent.py ──► Mistral (comprend, choisit l'outil, écri
                          (lecture seule, dataset limité, plafond de coût)
 ```
 
+## Pourquoi un MCP ?
+
+**MCP (Model Context Protocol) est une prise standard entre une IA et des données ou des outils**,
+comme l'USB pour les appareils. L'IA ne touche jamais la base directement. Elle demande
+« appelle l'outil `kpi_taux_impayes` », et c'est le serveur MCP qui exécute la requête :
+
+```
+Mistral (le cerveau)  ──►  serveur MCP (les mains)  ──►  BigQuery (les données)
+ « je veux le taux          exécute la requête,
+   d'impayés »              renvoie le résultat
+```
+
+**Ce que ça apporte, constaté dans ce POC :**
+
+1. **Changer de source sans toucher à l'IA.** Le projet est passé de SQLite à BigQuery, puis
+   du serveur local au serveur hébergé par Google, sans réécrire l'agent Mistral.
+2. **Un serveur tout fait.** Google fournit le serveur MCP BigQuery (connexion,
+   authentification, lecture seule). Dans sa version distante, il n'y a même rien à héberger.
+3. **Des garde-fous au bon endroit.** Lecture seule, dataset limité et plafond de coût sont
+   appliqués par le serveur, pas par l'IA. Même si l'IA « veut » faire un `DELETE`, elle ne peut pas.
+4. **La réutilisation.** Le même serveur peut être branché tel quel sur d'autres assistants
+   (Claude Desktop, Le Chat de Mistral, Gemini, Copilot, un agent interne…), sans recoder la
+   connexion à la base.
+5. **La séparation des rôles.** L'équipe data maintient le serveur MCP (indicateurs officiels,
+   droits, sécurité). Les équipes produit construisent leurs assistants par-dessus, sans accès
+   direct à la base.
+
+## L'autre manière : sans MCP
+
+Un MCP **n'est pas obligatoire**. Une architecture « pipeline » classique fonctionne très bien
+pour une seule application :
+
+```
+Streamlit (question)
+   → Mistral + couche sémantique (définitions métier, schéma, exemples)
+   → génération du SQL
+   → vérifications dans le code (lecture seule, LIMIT, estimation du coût)
+   → exécution directe sur BigQuery (bibliothèque google-cloud-bigquery)
+   → Mistral reformule le résultat en français
+   → Streamlit (réponse + tableau)
+```
+
+L'application fait tout elle-même : elle appelle Mistral, récupère le SQL, l'exécute avec la
+bibliothèque BigQuery et renvoie le résultat. Il n'y a ni serveur MCP ni appel d'outils.
+
+| | Sans MCP (pipeline) | Avec MCP |
+|---|---|---|
+| Mise en place | Plus simple : une seule app, moins de pièces | Une couche en plus (le serveur MCP) |
+| Prévisibilité | Étapes fixes, faciles à déboguer | L'IA choisit ses outils (plus souple, moins prévisible) |
+| Connexion à la base | Codée dans l'app | Fournie par le serveur (ex. celui de Google) |
+| Sécurité | À recoder dans chaque app | Centralisée dans le serveur |
+| Plusieurs assistants | Chacun recode sa connexion et ses règles | Un serveur branché partout |
+| Changer de base ou d'IA | Il faut modifier le code | On change l'URL du serveur |
+
+**En résumé :** pour **une seule app**, le pipeline sans MCP suffit et reste le plus simple.
+MCP devient rentable quand l'entreprise veut **plusieurs assistants** branchés sur les **mêmes
+données**, avec les **mêmes règles**, ou quand elle veut s'appuyer sur un serveur fourni et
+hébergé par l'éditeur (comme celui de Google pour BigQuery).
+
+Dans les deux cas, **la qualité des réponses dépend surtout de la couche sémantique**, pas du MCP.
+
 ## Ce qu'il y a dans le projet
 
 | Fichier | Rôle |
