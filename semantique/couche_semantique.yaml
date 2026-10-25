@@ -1,0 +1,137 @@
+# ============================================================
+#  COUCHE SÉMANTIQUE — Banque Démo (données fictives)
+# ============================================================
+# Le "dictionnaire métier" que l'IA lit avant de répondre.
+# Il traduit le vocabulaire de la banque en tables / colonnes / règles.
+# C'est ce fichier (et les outils kpi_* de mcp/tools.bigquery.yaml) que le métier
+# doit valider : c'est lui qui garantit que "taux d'impayés" veut dire
+# la même chose pour tout le monde.
+
+contexte: >
+  Banque de détail française fictive, 8 agences, environ 600 clients.
+  Les données s'arrêtent au 2026-09-30 : c'est "aujourd'hui" pour le jeu de données.
+  "Le mois dernier" = 2026-09, "cette année" = 2026, "les 12 derniers mois" = 2025-10 à 2026-09.
+  Tous les montants sont en euros.
+
+tables:
+  agences:
+    description: Une ligne par agence bancaire.
+    colonnes:
+      agence_id: Identifiant (AG01 à AG08)
+      nom_agence: Nom de l'agence
+      ville: Ville
+      region: Région administrative
+  clients:
+    description: Une ligne par client.
+    colonnes:
+      client_id: Identifiant (CL00001…)
+      prenom: Prénom
+      nom: Nom
+      date_naissance: Date de naissance
+      ville: Ville de l'agence de rattachement
+      segment: "'Particulier', 'Premium' ou 'Professionnel'"
+      agence_id: Agence de rattachement (-> agences)
+      date_entree: Date d'entrée en relation
+      score_risque: "1 (très faible risque) à 10 (risque élevé)"
+  comptes:
+    description: Une ligne par compte (courant ou épargne).
+    colonnes:
+      compte_id: Identifiant (CP000001…)
+      client_id: Titulaire (-> clients)
+      type_compte: "'Compte courant', 'Livret A', 'LDDS', 'PEL', 'Assurance vie', 'Compte titres'"
+      date_ouverture: Date d'ouverture
+      statut: "'actif' ou 'clos'"
+      solde: Solde actuel ; peut être négatif pour un compte courant (découvert)
+  transactions:
+    description: Opérations des comptes courants sur les 12 derniers mois.
+    colonnes:
+      transaction_id: Identifiant
+      compte_id: Compte concerné (-> comptes)
+      date_operation: Date de l'opération
+      montant: "Montant signé : NÉGATIF = débit / dépense, POSITIF = crédit / revenu"
+      type_operation: "'CB', 'Virement', 'Prélèvement', 'Retrait DAB'"
+      categorie: "'Alimentation', 'Transport', 'Loisirs', 'Santé', 'Logement', 'Assurances', 'Espèces', 'Revenus', 'Épargne'"
+      libelle: Libellé bancaire
+  credits:
+    description: Une ligne par crédit accordé.
+    colonnes:
+      credit_id: Identifiant
+      client_id: Emprunteur (-> clients)
+      type_credit: "'Immobilier', 'Consommation', 'Auto', 'Professionnel'"
+      montant_initial: Montant emprunté
+      taux_annuel: Taux nominal annuel en %
+      duree_mois: Durée totale en mois
+      date_debut: Date de déblocage
+      capital_restant_du: Capital restant à rembourser (0 si soldé)
+      statut: "'en cours', 'soldé' ou 'impayé'"
+
+relations:
+  - clients.agence_id = agences.agence_id
+  - comptes.client_id = clients.client_id
+  - transactions.compte_id = comptes.compte_id
+  - credits.client_id = clients.client_id
+
+# Définitions officielles des indicateurs. Toujours les respecter.
+indicateurs:
+  encours_depots: "SUM(comptes.solde) des comptes au statut 'actif'"
+  encours_epargne: "Comme encours_depots mais en excluant type_compte = 'Compte courant'"
+  encours_credits: "SUM(credits.capital_restant_du) des crédits au statut 'en cours' ou 'impayé'"
+  taux_impayes: "capital_restant_du des crédits 'impayé' / encours_credits, en %"
+  client_actif: "Client ayant au moins un compte au statut 'actif'"
+  depenses: "-SUM(montant) des transactions où montant < 0 (afficher en positif)"
+  revenus: "SUM(montant) des transactions où categorie = 'Revenus'"
+  client_a_risque: "score_risque >= 8"
+  decouvert: "Compte courant actif avec solde < 0"
+
+# Mots que les utilisateurs emploient -> terme de la couche sémantique
+synonymes:
+  encours: [encours, "argent déposé", collecte, "dépôts", avoirs]
+  encours_credits: [encours de crédit, "prêts en cours", "crédits en cours", "emprunts"]
+  taux_impayes: [impayés, "taux de défaut", "défauts de paiement", sinistralité]
+  depenses: ["dépenses", "débits", "sorties d'argent", consommation]
+  segment Premium: [VIP, "clients haut de gamme", "patrimoniaux"]
+  segment Professionnel: [pros, entreprises, "artisans", "TPE"]
+
+regles:
+  - N'écris QUE des requêtes SELECT. Jamais d'INSERT, UPDATE, DELETE, CREATE, DROP.
+  - Noms de colonnes et alias SQL sans accents (age_moyen, region, depenses).
+  - Ajoute LIMIT 50 aux requêtes qui listent des lignes individuelles.
+  - Exclus les comptes 'clos' des calculs d'encours, sauf demande explicite.
+  - Ne renvoie jamais de liste complète de données personnelles ; agrège ou limite.
+  - Si la question est ambiguë (période, périmètre), choisis l'interprétation la plus courante et précise-la dans ta réponse.
+
+# Exemples validés question -> SQL. {p} = préfixe des tables (banque_demo. en BigQuery, vide en SQLite).
+exemples:
+  - question: Combien de clients Premium avons-nous à Lyon ?
+    sql: |
+      SELECT COUNT(*) AS nb_clients
+      FROM {p}clients
+      WHERE segment = 'Premium' AND ville = 'Lyon'
+  - question: Quels sont les 10 clients avec la plus grosse épargne ?
+    sql: |
+      SELECT cl.client_id, cl.prenom, cl.nom, ROUND(SUM(co.solde), 2) AS epargne
+      FROM {p}comptes co JOIN {p}clients cl USING (client_id)
+      WHERE co.statut = 'actif' AND co.type_compte != 'Compte courant'
+      GROUP BY 1, 2, 3
+      ORDER BY epargne DESC
+      LIMIT 10
+  - question: Combien de clients sont à découvert, par segment ?
+    sql: |
+      SELECT cl.segment, COUNT(DISTINCT co.client_id) AS nb_clients_decouvert
+      FROM {p}comptes co JOIN {p}clients cl USING (client_id)
+      WHERE co.type_compte = 'Compte courant' AND co.statut = 'actif' AND co.solde < 0
+      GROUP BY cl.segment
+
+# Idiomes de dates selon le moteur
+dialectes:
+  bigquery: |
+    Dialecte GoogleSQL (BigQuery). Tables préfixées par banque_demo. (ex : banque_demo.clients).
+    Mois d'une date : FORMAT_DATE('%Y-%m', date_operation)
+    Année : EXTRACT(YEAR FROM date_operation)
+    Âge exact : DATE_DIFF(DATE '2026-09-30', date_naissance, YEAR) - IF(FORMAT_DATE('%m%d', date_naissance) > '0930', 1, 0)
+    Alias de colonnes : sans accent ni guillemets (ex : AS region, pas AS "région").
+  sqlite: |
+    Dialecte SQLite. Tables sans préfixe (ex : clients). Les dates sont du texte 'AAAA-MM-JJ'.
+    Mois d'une date : substr(date_operation, 1, 7)
+    Année : substr(date_operation, 1, 4)
+    Âge : CAST((julianday('2026-09-30') - julianday(date_naissance)) / 365.25 AS INTEGER)

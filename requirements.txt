@@ -1,0 +1,7 @@
+mistralai==3.4.0
+mcp==2.3.0
+streamlit==1.66.1
+google-cloud-bigquery==3.46.2
+python-dotenv
+pyyaml
+pandas

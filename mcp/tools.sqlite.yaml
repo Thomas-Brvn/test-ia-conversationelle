@@ -1,0 +1,146 @@
+# Même serveur MCP, mais branché sur la base SQLite locale (data/banque.db).
+# Sert à tester toute la chaîne sans compte GCP.
+# Lancement (depuis la racine du projet) : ./bin/toolbox --config mcp/tools.sqlite.yaml
+# Les noms d'outils sont identiques à la version BigQuery : l'app ne voit pas la différence.
+
+kind: source
+name: banque-sqlite
+type: sqlite
+database: "file:data/banque.db?mode=ro"  # lecture seule
+---
+kind: tool
+name: lister_tables
+type: sqlite-sql
+source: banque-sqlite
+description: Liste les tables disponibles dans la base.
+annotations:
+  readOnlyHint: true   # SQL figé, en lecture seule (sinon Toolbox masque l'outil sur une source read-only)
+statement: SELECT name AS table_name FROM sqlite_master WHERE type = 'table' ORDER BY name
+---
+kind: tool
+name: decrire_table
+type: sqlite-sql
+source: banque-sqlite
+description: Renvoie les colonnes et types d'une table.
+parameters:
+  - name: table_name
+    type: string
+    description: Nom de la table (ex. clients).
+annotations:
+  readOnlyHint: true   # SQL figé, en lecture seule (sinon Toolbox masque l'outil sur une source read-only)
+statement: SELECT name AS colonne, type FROM pragma_table_info(?)
+---
+kind: tool
+name: executer_sql
+type: sqlite-execute-sql
+source: banque-sqlite
+description: >
+  Exécute une requête SQL SELECT (dialecte SQLite) sur la base bancaire.
+  À utiliser seulement si aucun outil métier (kpi_*, fiche_client, depenses_*) ne répond à la question.
+---
+kind: tool
+name: kpi_encours_par_agence
+type: sqlite-sql
+source: banque-sqlite
+description: >
+  Encours de dépôts (somme des soldes des comptes actifs) et encours de crédits
+  (capital restant dû des crédits en cours ou impayés) pour chaque agence.
+annotations:
+  readOnlyHint: true   # SQL figé, en lecture seule (sinon Toolbox masque l'outil sur une source read-only)
+statement: |
+  WITH depots AS (
+    SELECT cl.agence_id, SUM(co.solde) AS encours_depots, COUNT(DISTINCT co.client_id) AS nb_clients
+    FROM comptes co JOIN clients cl USING (client_id)
+    WHERE co.statut = 'actif'
+    GROUP BY 1
+  ), encours_credits AS (
+    SELECT cl.agence_id, SUM(cr.capital_restant_du) AS encours_credits
+    FROM credits cr JOIN clients cl USING (client_id)
+    WHERE cr.statut IN ('en cours', 'impayé')
+    GROUP BY 1
+  )
+  SELECT a.nom_agence, a.region, d.nb_clients,
+         ROUND(d.encours_depots, 2) AS encours_depots,
+         ROUND(COALESCE(c.encours_credits, 0), 2) AS encours_credits
+  FROM agences a
+  LEFT JOIN depots d USING (agence_id)
+  LEFT JOIN encours_credits c USING (agence_id)
+  ORDER BY encours_depots DESC
+---
+kind: tool
+name: kpi_taux_impayes
+type: sqlite-sql
+source: banque-sqlite
+description: >
+  Taux d'impayés par type de crédit. Définition officielle : capital restant dû des crédits
+  au statut 'impayé' divisé par le capital restant dû de tous les crédits actifs (en cours + impayé).
+annotations:
+  readOnlyHint: true   # SQL figé, en lecture seule (sinon Toolbox masque l'outil sur une source read-only)
+statement: |
+  SELECT type_credit,
+         COUNT(*) AS nb_credits_actifs,
+         SUM(CASE WHEN statut = 'impayé' THEN 1 ELSE 0 END) AS nb_impayes,
+         ROUND(SUM(capital_restant_du), 2) AS encours,
+         ROUND(100 * SUM(CASE WHEN statut = 'impayé' THEN capital_restant_du ELSE 0 END)
+               / NULLIF(SUM(capital_restant_du), 0), 2) AS taux_impayes_pct
+  FROM credits
+  WHERE statut IN ('en cours', 'impayé')
+  GROUP BY type_credit
+  ORDER BY taux_impayes_pct DESC
+---
+kind: tool
+name: depenses_par_categorie
+type: sqlite-sql
+source: banque-sqlite
+description: >
+  Total des dépenses (débits, montants négatifs) par catégorie pour un mois donné.
+  Le résultat est exprimé en valeur positive.
+parameters:
+  - name: mois
+    type: string
+    description: Mois au format AAAA-MM, par exemple 2026-09.
+annotations:
+  readOnlyHint: true   # SQL figé, en lecture seule (sinon Toolbox masque l'outil sur une source read-only)
+statement: |
+  SELECT categorie,
+         COUNT(*) AS nb_operations,
+         ROUND(-SUM(montant), 2) AS total_depenses
+  FROM transactions
+  WHERE montant < 0 AND substr(date_operation, 1, 7) = ?
+  GROUP BY categorie
+  ORDER BY total_depenses DESC
+---
+kind: tool
+name: fiche_client
+type: sqlite-sql
+source: banque-sqlite
+description: Vue 360° d'un client à partir de son identifiant (ex. CL00042) — profil, épargne, crédits.
+parameters:
+  - name: client_id
+    type: string
+    description: Identifiant client, format CL suivi de 5 chiffres.
+annotations:
+  readOnlyHint: true   # SQL figé, en lecture seule (sinon Toolbox masque l'outil sur une source read-only)
+statement: |
+  SELECT cl.client_id, cl.prenom, cl.nom, cl.segment, cl.score_risque, a.nom_agence,
+         (SELECT ROUND(SUM(solde), 2) FROM comptes
+           WHERE client_id = cl.client_id AND statut = 'actif' AND type_compte != 'Compte courant') AS epargne_totale,
+         (SELECT ROUND(SUM(solde), 2) FROM comptes
+           WHERE client_id = cl.client_id AND statut = 'actif' AND type_compte = 'Compte courant') AS solde_compte_courant,
+         (SELECT ROUND(SUM(capital_restant_du), 2) FROM credits
+           WHERE client_id = cl.client_id AND statut IN ('en cours', 'impayé')) AS encours_credits,
+         (SELECT COUNT(*) FROM credits
+           WHERE client_id = cl.client_id AND statut = 'impayé') AS nb_credits_impayes
+  FROM clients cl JOIN agences a USING (agence_id)
+  WHERE cl.client_id = ?
+---
+kind: toolset
+name: banque
+tools:
+  - lister_tables
+  - decrire_table
+  - executer_sql
+  - kpi_encours_par_agence
+  - kpi_taux_impayes
+  - depenses_par_categorie
+  - fiche_client

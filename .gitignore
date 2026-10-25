@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Environnement Python
+.venv/
+__pycache__/
+
+# Binaire MCP Toolbox (à télécharger, voir README)
+bin/
+
+# Données générées (python data/generer_donnees.py)
+data/csv/
+data/banque.db
+
+# Historique local des conversations
+historique/
+
+# Config locale
+.claude/
+.DS_Store
