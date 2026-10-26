@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "MCP Toolbox: lancer (BigQuery)",
+      "type": "shell",
+      "command": "set -a && source .env && set +a && ./bin/toolbox --config mcp/tools.bigquery.yaml",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "presentation": { "panel": "dedicated", "group": "mcp" },
+      "problemMatcher": []
+    }
+  ]
+}
